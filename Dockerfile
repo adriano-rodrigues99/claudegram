@@ -23,7 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        -o /usr/local/bin/yt-dlp \
     && chmod +x /usr/local/bin/yt-dlp \
     && curl -fsSL https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_linux_amd64.tar.gz \
-       | tar xz --strip-components=2 -C /usr/local/bin gh_2.93.0_linux_amd64/bin/gh
+       | tar xz --strip-components=2 -C /usr/local/bin gh_2.93.0_linux_amd64/bin/gh \
+    && ln -s /usr/local/bin/gh /usr/bin/gh
 
 # Docker CLI (client only, no daemon) to inspect/manage the HOST's containers via
 # the mounted /var/run/docker.sock (see docker-compose.override.yml). The engine
