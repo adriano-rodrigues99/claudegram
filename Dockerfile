@@ -42,6 +42,11 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 # env var (set in .env), NEVER --token on argv (leaks in shell history / ps).
 RUN npm install -g vercel@latest
 
+# Claude Code CLI — only for interactive auth (docker exec -it claudegram claude)
+# and debugging. The bot itself uses the SDK's bundled executable; both share
+# credentials at /root/.claude/.credentials.json (persisted volume).
+RUN npm install -g @anthropic-ai/claude-code
+
 # Legacy MongoDB 4.4 shell for DocumentDB queries via SSH tunnel.
 # DocDB advertises wire version 7 (MongoDB 4.0) — the modern mongosh refuses
 # it, so the legacy `mongo` shell is required. The ubuntu2004 build needs

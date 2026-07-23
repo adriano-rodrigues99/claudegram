@@ -3,19 +3,24 @@ services:
     build: .
     container_name: claudegram
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - .env
     environment:
       # Agent works inside the mounted workspace, never the container root
       WORKSPACE_DIR: /workspace
       BOT_MODE: prod
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: "2"
     volumes:
-      # Projects the agent can see/edit (bind mount on the host)
-      - ./workspace:/workspace
-      # Bot state: session history, user preferences, per-chat settings
-      - claudegram-state:/root/.claudegram
-      # Claude Code state: sessions, credentials (if using OAuth login)
-      - claude-state:/root/.claude
+      # Cloned repos — named volume, survives any redeploy
+      - claudegram-workspace:/workspace
+      # Entire container home: .claude (login), .claudegram (bot state),
+      # .gitconfig, .ssh, .aws, .config/gh — all persistent
+      - claudegram-home:/root
 
 volumes:
-  claudegram-state:
-  claude-state:
+  claudegram-workspace:
+  claudegram-home:
