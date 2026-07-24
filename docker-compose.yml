@@ -2,6 +2,7 @@ services:
   claudegram:
     build: .
     container_name: claudegram
+    hostname: claudegram-vps
     restart: unless-stopped
     env_file:
       - .env
