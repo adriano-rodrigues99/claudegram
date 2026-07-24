@@ -4,7 +4,7 @@
 // in claudegram.test.mjs. The pull/push orchestration is verified manually.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, statSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -144,6 +144,36 @@ function sh(file, args) {
   return execFileSync(file, args, { encoding: 'utf8' });
 }
 
+// The transcript store (~/.claude) lives INSIDE the claudegram container. When
+// it is a Docker named volume (not a host bind mount), the host has no direct
+// path to it — so transcript reads/writes must go through `docker exec`, exactly
+// like the sessions.json/inbox reads already do. These helpers keep every remote
+// transcript access container-routed, regardless of the VM's mount layout.
+const remoteFile = (id) => `${remoteProjDir()}/${id}.jsonl`;
+// The remote command string is re-parsed by the VM's login shell (ssh joins
+// argv with spaces) before `docker exec` runs — so `<`/`||`/`&&` would be
+// interpreted on the HOST, not in the container. Wrap the whole pipeline in an
+// inner `sh -c '...'` (single-quoted) so those operators reach the container.
+function dexec(innerSh) {
+  return sh('ssh', [CFG.host, 'docker', 'exec', 'claudegram', 'sh', '-c', `'${innerSh}'`]).trim();
+}
+function remoteLineCount(id) {
+  // cat|wc avoids `<` redirection (would be a host-side redirect); missing file → -1
+  return Number(dexec(`cat ${remoteFile(id)} 2>/dev/null | wc -l || echo -1`));
+}
+function remoteHas(id) {
+  return dexec(`test -f ${remoteFile(id)} && echo yes || echo no`) === 'yes';
+}
+function pullTranscript(id, dest) {
+  const data = execFileSync('ssh', [CFG.host, 'docker', 'exec', 'claudegram', 'cat', remoteFile(id)]);
+  writeFileSync(dest, data);
+}
+function pushTranscript(srcPath, id) {
+  const data = readFileSync(srcPath);
+  execFileSync('ssh', [CFG.host, 'docker', 'exec', '-i', 'claudegram', 'sh', '-c',
+    `mkdir -p ${remoteProjDir()} && cat > ${remoteFile(id)}`], { input: data });
+}
+
 // First line of the recap prompt. Doubles as a signature: a `claude -p` recap
 // call is itself a session whose first user message is this prompt, so we use it
 // to recognize and skip recap-generation transcripts (see isRecapTranscript).
@@ -222,12 +252,12 @@ async function cmdPull() {
   const dest = join(localProjDir(), `${id}.jsonl`);
   mkdirSync(localProjDir(), { recursive: true });
   const force = process.argv.includes('--force');
-  const remoteLines = Number(sh('ssh', [CFG.host, `wc -l < ${remoteProjDir()}/${id}.jsonl`]).trim()) + 1;
+  const remoteLines = remoteLineCount(id) + 1;
   if (!force && compareForClobber(fileMeta(dest), { lines: remoteLines }) === 'dest-newer') {
     console.error(`Local copy looks newer/larger than the VM's. Re-run with --force to overwrite.`);
     process.exit(1);
   }
-  sh('scp', [`${CFG.host}:${remoteProjDir()}/${id}.jsonl`, dest]);
+  pullTranscript(id, dest);
   const launchLine = `${CLAUDE_CMD.join(' ')} --resume ${id}`;
   if (process.argv.includes('--print')) {
     console.log(`\nPulled. Continue with:\n  cd ${CFG.localWorkspace} && ${launchLine}`);
@@ -257,15 +287,14 @@ async function cmdPush() {
   const src = join(localProjDir(), `${id}.jsonl`);
   if (!existsSync(src)) { console.error(`Local session ${id} not found at ${src}`); process.exit(1); }
   const force = process.argv.includes('--force');
-  const remoteExists = sh('ssh', [CFG.host, `test -f ${remoteProjDir()}/${id}.jsonl && echo yes || echo no`]).trim() === 'yes';
-  if (remoteExists && !force) {
-    const remoteLines = Number(sh('ssh', [CFG.host, `wc -l < ${remoteProjDir()}/${id}.jsonl`]).trim()) + 1;
+  if (remoteHas(id) && !force) {
+    const remoteLines = remoteLineCount(id) + 1;
     if (compareForClobber({ lines: remoteLines }, fileMeta(src)) === 'dest-newer') {
       console.error(`VM copy looks newer/larger. Re-run with --force to overwrite.`);
       process.exit(1);
     }
   }
-  sh('scp', [src, `${CFG.host}:${remoteProjDir()}/${id}.jsonl`]);
+  pushTranscript(src, id);
   // Ask the bot to auto-create a topic and adopt the session (no manual /adopt).
   const nameIdx = process.argv.indexOf('--name');
   const name = nameIdx !== -1 ? (process.argv[nameIdx + 1] || null) : null;
@@ -297,10 +326,12 @@ function readRemoteArchived() {
 function readRemoteLineCounts(ids) {
   if (!ids.length) return {};
   const dir = remoteProjDir();
-  const cmd = ids.map((id) => `echo "${id} $(wc -l < ${dir}/${id}.jsonl 2>/dev/null || echo -1)"`).join('; ');
+  // cat|wc (not `<`) so redirection isn't parsed host-side; whole pipeline
+  // single-quoted via dexec so it runs inside the container. See remoteLineCount.
+  const cmd = ids.map((id) => `echo "${id} $(cat ${dir}/${id}.jsonl 2>/dev/null | wc -l || echo -1)"`).join('; ');
   const map = {};
   try {
-    for (const line of sh('ssh', [CFG.host, cmd]).split('\n')) {
+    for (const line of dexec(cmd).split('\n')) {
       const [id, n] = line.trim().split(/\s+/);
       if (!id) continue;
       const raw = Number(n);
@@ -403,7 +434,7 @@ async function cmdSync() {
       continue;
     }
     try {
-      sh('scp', [c.path, `${CFG.host}:${remoteProjDir()}/${c.id}.jsonl`]);
+      pushTranscript(c.path, c.id);
       // Recap is generated bot-side (Groq) from the pushed transcript — no local
       // `claude -p` (which broke under launchd via TCC and polluted the session list).
       // source:'sync' lets the bot refuse to recreate a topic the user retired
@@ -433,7 +464,7 @@ async function cmdSync() {
     const action = refreshAction(localLines, vmLines);
     if (action === 'push') {
       try {
-        sh('scp', [c.path, `${CFG.host}:${remoteProjDir()}/${c.id}.jsonl`]);
+        pushTranscript(c.path, c.id);
         refreshed++;
         console.log(`  ↻ ${c.name || c.id} (local ${localLines} → VM, estava ${vmLines})`);
       } catch (err) {
