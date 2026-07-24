@@ -170,8 +170,10 @@ function pullTranscript(id, dest) {
 }
 function pushTranscript(srcPath, id) {
   const data = readFileSync(srcPath);
-  execFileSync('ssh', [CFG.host, 'docker', 'exec', '-i', 'claudegram', 'sh', '-c',
-    `mkdir -p ${remoteProjDir()} && cat > ${remoteFile(id)}`], { input: data });
+  // single-quote the inner command so `&&`/`>` run in the container, not the
+  // host login shell (ssh joins argv with spaces). stdin carries the transcript.
+  const inner = `mkdir -p ${remoteProjDir()} && cat > ${remoteFile(id)}`;
+  execFileSync('ssh', [CFG.host, 'docker', 'exec', '-i', 'claudegram', 'sh', '-c', `'${inner}'`], { input: data });
 }
 
 // First line of the recap prompt. Doubles as a signature: a `claude -p` recap
